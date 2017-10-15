@@ -1,4 +1,5 @@
 from __future__ import print_function
+import getopt
 import os
 import re
 import select
@@ -8,7 +9,22 @@ import time
 
 from .errors import NetcatError, NetcatTimeout
 
-PROTOCAL_RE = re.compile('^[a-z]+://')
+PROTOCAL_RE = re.compile('^[a-z0-9]+://')
+KNOWN_SCHEMES = {
+    # schema: (udp, ipv6, port); None = unchanged
+    'tcp': (False, None, None),
+    'tcp4': (False, False, None),
+    'tcp6': (False, True, None),
+    'udp': (True, None, None),
+    'udp4': (True, False, None),
+    'udp6': (True, True, None),
+    'http': (False, None, 80),
+    'https': (False, None, 443),
+    'dns': (True, None, 53),
+    'ftp': (False, None, 20),
+    'ssh': (False, None, 22),
+    'smtp': (False, None, 25),
+}
 
 if str is not bytes: # py3
     long = int # pylint: disable=redefined-builtin,invalid-name
@@ -201,27 +217,34 @@ class Netcat(object):
             if target.startswith('nc '):
                 out_host = None
                 out_port = None
-                pieces = target.split()[1:]
-                while pieces and pieces[0][0] == '-':
-                    if pieces[0] == '-u':
+
+                try:
+                    opts, pieces = getopt.getopt(target.split()[1:], 'tu46lp:',
+                                                 ['tcp', 'udp', 'local-port=', 'source-port='])
+                except getopt.GetoptError as exc:
+                    raise ValueError(exc)
+
+                for opt, arg in opts:
+                    if opt == '-t' or opt == '--tcp':
+                        udp = False
+                    elif opt == '-u' or opt == '--udp':
                         udp = True
-                    elif pieces[0] == '-4':
+                    elif opt == '-4':
                         ipv6 = False
-                    elif pieces[0] == '-6':
+                    elif opt == '-6':
                         ipv6 = True
-                    elif pieces[0] == '-l':
+                    elif opt == '-l':
                         listen = True
-                    elif pieces[0] == '-p':
-                        out_port = int(pieces.pop(1))
+                    elif opt in ['-p', '--local-port', '--source-port']:
+                        out_port = int(arg)
                     else:
-                        raise ValueError("Can't parse option %s" % pieces[0])
-                    pieces.pop(0)
+                        assert False, "unhandled option"
 
                 if not pieces:
                     pass
                 elif len(pieces) == 1:
                     if listen and pieces[0].isdigit():
-                        out_port = int(listen)
+                        out_port = int(pieces[0])
                     else:
                         out_host = pieces[0]
                 elif len(pieces) == 2 and pieces[1].isdigit():
@@ -247,42 +270,17 @@ class Netcat(object):
                 parsed = urlparse(target)
                 port = None
 
-                if parsed.scheme == 'tcp':
-                    udp = False
-                elif parsed.scheme == 'tcp4':
-                    udp = False
-                    ipv6 = False
-                elif parsed.scheme == 'tcp6':
-                    udp = False
-                    ipv6 = True
-                elif parsed.scheme == 'udp':
-                    udp = True
-                elif parsed.scheme == 'udp4':
-                    udp = True
-                    ipv6 = False
-                elif parsed.scheme == 'udp6':
-                    udp = True
-                    ipv6 = True
-                elif parsed.scheme == 'http':
-                    udp = False
-                    port = 80
-                elif parsed.scheme == 'https':
-                    udp = False
-                    port = 443
-                elif parsed.scheme == 'dns':
-                    udp = True
-                    port = 53
-                elif parsed.scheme == 'ftp':
-                    udp = False
-                    port = 20
-                elif parsed.scheme == 'ssh':
-                    udp = False
-                    port = 22
-                elif parsed.scheme == 'smtp':
-                    udp = False
-                    port = 25
-                else:
+                try:
+                    scheme_udp, scheme_ipv6, scheme_port = KNOWN_SCHEMES[parsed.scheme]
+                except KeyError:
                     raise ValueError("Unknown scheme: %s" % parsed.scheme)
+
+                if scheme_udp is not None:
+                    udp = scheme_udp
+                if scheme_ipv6 is not None:
+                    ipv6 = scheme_ipv6
+                if scheme_port is not None:
+                    port = scheme_port
 
                 if parsed.netloc.startswith('['):
                     addr, extra = parsed.netloc[1:].split(']', 1)
